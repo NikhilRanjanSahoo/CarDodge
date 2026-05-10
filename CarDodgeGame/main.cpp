@@ -1,543 +1,353 @@
 #include <SFML/Graphics.hpp>
-#include <iostream>
+#include <SFML/Audio.hpp>
 #include <vector>
 #include <cstdlib>
 #include <ctime>
-#include <sstream>
-#include <algorithm>
-#include <cmath>
+#include <iostream>
+#include <sstream>  
+#include <iomanip> 
+#include <memory>
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Constants
-// ─────────────────────────────────────────────────────────────────────────────
-const int WINDOW_W   = 500;
-const int WINDOW_H   = 750;
-const int ROAD_LEFT  = 70;
-const int ROAD_RIGHT = 430;
-const int NUM_LANES  = 3;
-const float LANE_W   = (ROAD_RIGHT - ROAD_LEFT) / (float)NUM_LANES;
-const float CAR_W    = 52.f;
-const float CAR_H    = 88.f;
+using namespace sf;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Utility
-// ─────────────────────────────────────────────────────────────────────────────
-std::string toStr(int v) {
-    std::ostringstream o; o << v; return o.str();
-}
+// ==========================================
+// GAME STATE MACHINE
+// ==========================================
+enum class GameState {
+    Playing,
+    Paused,
+    GameOver
+};
 
-float laneX(int lane) {
-    return ROAD_LEFT + lane * LANE_W + (LANE_W - CAR_W) / 2.f;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Base Car
-// ─────────────────────────────────────────────────────────────────────────────
+// ==========================================
+// BASE CLASS: Car
+// ==========================================
 class Car {
+protected:
+    Sprite sprite;
+    float m_speed; 
+    
 public:
-    sf::Sprite sprite;
-    float speed;
-    bool active;
+    Car(float startX, float startY, float startSpeed, const Texture& texture) : m_speed(startSpeed) {
+        sprite.setTexture(texture);
+        sprite.setScale(0.5f, 0.5f); 
+        sprite.setPosition(startX, startY);
+    }
+    
+    virtual ~Car() = default; 
+    
+    virtual void update(float dt, float currentRoadSpeed = 0.f) = 0; 
 
-    Car() : speed(0.f), active(true) {}
+    void draw(RenderWindow& window) {
+        window.draw(sprite);
+    }
 
-    virtual void update(float dt) = 0;
-
-    sf::FloatRect getBounds() const {
+    FloatRect getBounds() const {
         return sprite.getGlobalBounds();
     }
-
-    void setPosition(float x, float y) {
-        sprite.setPosition(x, y);
-    }
-
-    sf::Vector2f getPosition() const {
+    
+    Vector2f getPosition() const {
         return sprite.getPosition();
     }
-
-    virtual void draw(sf::RenderWindow& w) {
-        w.draw(sprite);
-    }
-
-    virtual ~Car() {}
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Player Car
-// ─────────────────────────────────────────────────────────────────────────────
+// ==========================================
+// DERIVED CLASS: PlayerCar
+// ==========================================
 class PlayerCar : public Car {
+private:
+    float roadMinX; 
+    float roadMaxX; 
+    int m_direction; // -1 for Left, 1 for Right, 0 for Idle
+
 public:
-    int currentLane;
-    float targetX;
+    PlayerCar(float startX, float startY, float speed, float minX, float maxX, const Texture& tex) 
+        : Car(startX, startY, speed, tex), roadMinX(minX), roadMaxX(maxX), m_direction(0) {}
 
-    PlayerCar(sf::Texture& tex) {
-        currentLane = 1;
-        sprite.setTexture(tex);
-        // Scale texture to desired car size
-        sf::FloatRect tb = sprite.getLocalBounds();
-        sprite.setScale(CAR_W / tb.width, CAR_H / tb.height);
-        targetX = laneX(currentLane);
-        sprite.setPosition(targetX, WINDOW_H - CAR_H - 50.f);
-    }
+    // --- Encapsulated Movement Methods ---
+    void moveLeft() { m_direction = -1; }
+    void moveRight() { m_direction = 1; }
 
-    void moveLeft() {
-        if (currentLane > 0) { currentLane--; targetX = laneX(currentLane); }
-    }
+    void update(float dt, float currentRoadSpeed = 0.f) override {
+        // Prevent compiler warning for unused parameter
+        (void)currentRoadSpeed; 
 
-    void moveRight() {
-        if (currentLane < NUM_LANES - 1) { currentLane++; targetX = laneX(currentLane); }
-    }
+        // Calculate intended movement based on direction
+        float movement = m_direction * m_speed * dt;
+        
+        Vector2f pos = sprite.getPosition();
+        float newX = pos.x + movement;
 
-    void update(float dt) override {
-        float curX = sprite.getPosition().x;
-        float diff = targetX - curX;
-        if (std::abs(diff) > 1.f)
-            sprite.move(diff * 12.f * dt, 0.f);
-        else
-            sprite.setPosition(targetX, sprite.getPosition().y);
+        // Clamp boundaries explicitly before applying position
+        if (newX < roadMinX) {
+            newX = roadMinX;
+        } else if (newX + sprite.getGlobalBounds().width > roadMaxX) { 
+            newX = roadMaxX - sprite.getGlobalBounds().width;
+        }
+
+        sprite.setPosition(newX, pos.y);
+
+        // Reset direction so the car doesn't slide indefinitely
+        m_direction = 0;
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Enemy Car
-// ─────────────────────────────────────────────────────────────────────────────
+// ==========================================
+// DERIVED CLASS: EnemyCar
+// ==========================================
 class EnemyCar : public Car {
 public:
-    EnemyCar(sf::Texture& tex, int lane, float spd) {
-        speed = spd;
-        sprite.setTexture(tex);
-        sf::FloatRect tb = sprite.getLocalBounds();
-        sprite.setScale(CAR_W / tb.width, CAR_H / tb.height);
-        // Flip vertically so enemy cars face downward
-        sprite.setScale(sprite.getScale().x, -sprite.getScale().y);
-        sprite.setPosition(laneX(lane), -CAR_H);
-        // After flip, origin shifts — adjust
-        sprite.move(0.f, -CAR_H);
-    }
+    EnemyCar(float startX, float startY, float speed, const Texture& tex) 
+        : Car(startX, startY, speed, tex) {}
 
-    void update(float dt) override {
-        sprite.move(0.f, speed * dt);
-        if (sprite.getPosition().y > WINDOW_H + CAR_H + 10.f)
-            active = false;
+    void update(float dt, float currentRoadSpeed = 0.f) override {
+        // Enemies fall down the screen based on the sum of the road speed and their own speed
+        float relativeSpeed = currentRoadSpeed + m_speed;
+        sprite.move(0.f, relativeSpeed * dt);
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Game State & Difficulty
-// ─────────────────────────────────────────────────────────────────────────────
-enum class GameState  { MENU, PLAYING, PAUSED, GAMEOVER };
-enum class Difficulty { EASY, MEDIUM, HARD };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Main
-// ─────────────────────────────────────────────────────────────────────────────
+// ==========================================
+// MAIN FUNCTION
+// ==========================================
 int main() {
-    srand((unsigned)time(nullptr));
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
 
-    sf::RenderWindow window(sf::VideoMode(WINDOW_W, WINDOW_H), "Car Dodge", sf::Style::Close | sf::Style::Titlebar);
+    RenderWindow window(VideoMode(800, 600), "Car Dodging Game");
     window.setFramerateLimit(60);
 
-    // ── Load Font ──
-    sf::Font font;
-    bool fontLoaded = font.loadFromFile("assets/font.ttf");
-    if (!fontLoaded) {
-        fontLoaded = font.loadFromFile("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf");
+    // --- 1. LOAD GRAPHICS ---
+    Texture playerTex, redCarTex, yellowCarTex, roadTex;
+    if (!playerTex.loadFromFile("graphics/WhiteCar.png") ||
+        !redCarTex.loadFromFile("graphics/RedCar1.png") ||
+        !yellowCarTex.loadFromFile("graphics/YellowCar1.png") ||
+        !roadTex.loadFromFile("graphics/road.png")) {
+        std::cerr << "Error: Could not load graphics! Ensure 'graphics/' folder exists.\n";
+        return -1; 
     }
-    if (!fontLoaded) {
-        std::cerr << "ERROR: Could not load font!\n";
+
+    Font font;
+    if (!font.loadFromFile("DS-DIGI.TTF")) {
+        std::cerr << "Error: Could not load DS-DIGI.TTF!\n";
         return -1;
     }
 
-    // ── Load Textures ──
-    sf::Texture texPlayer, texRed1, texRed2, texYellow1, texYellow2, texYellow3;
-
-    auto loadTex = [](sf::Texture& t, const std::string& path) {
-        if (!t.loadFromFile(path)) {
-            std::cerr << "WARNING: Could not load " << path << "\n";
-            return false;
-        }
-        t.setSmooth(true);
-        return true;
-    };
-
-    loadTex(texPlayer,  "assets/WhiteCar.png");
-    loadTex(texRed1,    "assets/RedCar1.png");
-    loadTex(texRed2,    "assets/RedCar2.png");
-    loadTex(texYellow1, "assets/YellowCar1.png");
-    loadTex(texYellow2, "assets/YellowCar2.png");
-    loadTex(texYellow3, "assets/YellowCar3.png");
-
-    // Pool of enemy textures to pick from randomly
-    std::vector<sf::Texture*> enemyTextures = {
-        &texRed1, &texRed2, &texYellow1, &texYellow2, &texYellow3
-    };
-
-    // ── Build Lane Dash Marks ──
-    // We'll animate these by shifting their draw offset
-    struct Dash { float x, baseY; };
-    std::vector<Dash> dashes;
-    for (int lane = 1; lane < NUM_LANES; lane++) {
-        float lx = ROAD_LEFT + lane * LANE_W;
-        for (int y = 0; y < WINDOW_H + 60; y += 60) {
-            dashes.push_back({lx - 2.f, (float)y});
-        }
+    // --- 2. LOAD AUDIO ---
+    Music bgMusic;
+    if (!bgMusic.openFromFile("audio/music.ogg")) {
+        std::cerr << "Error: Could not load audio/music.ogg!\n";
+    } else {
+        bgMusic.setLoop(true); 
+        bgMusic.setVolume(50.f); 
+        bgMusic.play();
     }
 
-    // ── HUD Text helpers ──
-    auto makeText = [&](const std::string& s, int sz, sf::Color col) {
-        sf::Text t;
-        t.setFont(font);
-        t.setString(s);
-        t.setCharacterSize(sz);
-        t.setFillColor(col);
-        return t;
-    };
+    SoundBuffer crashBuffer, game_overBuffer;
+    if (!crashBuffer.loadFromFile("audio/crash.ogg") || !game_overBuffer.loadFromFile("audio/game_over2.ogg")) {
+        std::cerr << "Error: Could not load crash or game_over audio!\n";
+    }
+    Sound crashSound(crashBuffer); 
+    Sound game_overSound(game_overBuffer);
 
-    // ── Game Variables ──
-    GameState  state      = GameState::MENU;
-    Difficulty difficulty = Difficulty::MEDIUM;
+    // --- 3. SETUP BACKGROUND & HUD ---
+    Sprite roadBackground1(roadTex);
+    Sprite roadBackground2(roadTex);
+    roadBackground1.setPosition(0.f, 0.f);
+    roadBackground2.setPosition(0.f, -600.f);
+    float baseRoadSpeed = 300.f;
 
-    PlayerCar* player = nullptr;
-    std::vector<EnemyCar*> enemies;
+    Text scoreText("SCORE:0", font, 25);
+    scoreText.setPosition(20.f, 20.f);
+    scoreText.setFillColor(Color::White);
 
-    float spawnTimer    = 0.f;
-    float spawnInterval = 1.4f;
-    float baseSpeed     = 220.f;
-    float gameSpeed     = baseSpeed;
-    float elapsed       = 0.f;
-    int   score         = 0;
-    int   speedLevel    = 1;
-    int   highScore     = 0;
-    float markOffset    = 0.f;   // for animated lane marks
+    Text speedText("SPEED:1.0X", font, 25);
+    speedText.setPosition(670.f, 20.f);
+    speedText.setFillColor(Color::White);
 
-    // ── Apply Difficulty ──
-    auto applyDifficulty = [&]() {
-        switch (difficulty) {
-            case Difficulty::EASY:   baseSpeed = 160.f; spawnInterval = 2.0f; break;
-            case Difficulty::MEDIUM: baseSpeed = 220.f; spawnInterval = 1.4f; break;
-            case Difficulty::HARD:   baseSpeed = 300.f; spawnInterval = 0.9f; break;
-        }
-        gameSpeed = baseSpeed;
-    };
+    // Fixed UI text logic (removed \t to fix centering)
+    Text gameOverText("   GAME OVER\n>>Enter<< to Restart", font, 45);
+    FloatRect textRect = gameOverText.getLocalBounds();
+    gameOverText.setOrigin(textRect.left + textRect.width/2.0f, textRect.top  + textRect.height/2.0f);
+    gameOverText.setPosition(400.f, 300.f); 
+    gameOverText.setFillColor(Color::White);
+    gameOverText.setOutlineColor(sf::Color::Black);
+    gameOverText.setOutlineThickness(2.f);
 
-    // ── Reset / Start ──
-    auto resetGame = [&]() {
-        for (auto e : enemies) delete e;
-        enemies.clear();
-        delete player;
-        player = new PlayerCar(texPlayer);
-        spawnTimer = 0.f;
-        elapsed    = 0.f;
-        score      = 0;
-        speedLevel = 1;
-        applyDifficulty();
-    };
+    Text pausedText(">>ENTER<<", font, 70);
+    FloatRect pTextRect = pausedText.getLocalBounds();
+    pausedText.setOrigin(pTextRect.left + pTextRect.width/2.0f, pTextRect.top + pTextRect.height/2.0f);
+    pausedText.setPosition(400.f, 300.f);
+    pausedText.setFillColor(Color::White);
+    pausedText.setOutlineColor(sf::Color::Black);
+    pausedText.setOutlineThickness(2.f);
 
-    applyDifficulty();
+    // --- 4. INITIALIZE GAME STATE ---
+    GameState currentState = GameState::Paused; // Start paused so player can prep
+    float spawnTimer = 0.0f;
+    float baseSpawnInterval = 1.5f;
+    int score = 0;
+    float globalSpeedMultiplier = 1.0f; 
 
-    // ── Gradient sky background rectangles ──
-    sf::RectangleShape bgTop({(float)WINDOW_W, (float)WINDOW_H / 2.f});
-    bgTop.setFillColor(sf::Color(10, 10, 18));
-    bgTop.setPosition(0, 0);
-    sf::RectangleShape bgBot({(float)WINDOW_W, (float)WINDOW_H / 2.f});
-    bgBot.setFillColor(sf::Color(18, 18, 30));
-    bgBot.setPosition(0, WINDOW_H / 2.f);
+    PlayerCar player(400.f, 450.f, 350.f, 150.f, 650.f, playerTex); 
+    std::vector<std::unique_ptr<EnemyCar>> enemies; 
+    Clock clock; 
 
-    // ── Road shapes ──
-    sf::RectangleShape road({(float)(ROAD_RIGHT - ROAD_LEFT), (float)WINDOW_H});
-    road.setFillColor(sf::Color(38, 38, 38));
-    road.setPosition(ROAD_LEFT, 0);
-
-    sf::RectangleShape edgeL({5.f, (float)WINDOW_H}), edgeR({5.f, (float)WINDOW_H});
-    edgeL.setFillColor(sf::Color(230, 230, 230)); edgeL.setPosition(ROAD_LEFT  - 5.f, 0);
-    edgeR.setFillColor(sf::Color(230, 230, 230)); edgeR.setPosition(ROAD_RIGHT,       0);
-
-    // ── Dash shape (reused each frame) ──
-    sf::RectangleShape dashShape({4.f, 28.f});
-    dashShape.setFillColor(sf::Color(200, 200, 200, 180));
-
-    sf::Clock clock;
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // Main Loop
-    // ═════════════════════════════════════════════════════════════════════════
+    // ==========================================
+    // THE GAME LOOP
+    // ==========================================
     while (window.isOpen()) {
-        float dt = clock.restart().asSeconds();
-        if (dt > 0.05f) dt = 0.05f;
+        float deltaTime = clock.restart().asSeconds();
+        if (deltaTime > 0.1f) deltaTime = 0.1f; 
 
-        // ── Events ──
-        sf::Event event;
+        // --- A. EVENT HANDLING ---
+        Event event;
         while (window.pollEvent(event)) {
-            if (event.type == sf::Event::Closed)
-                window.close();
+            if (event.type == Event::Closed) window.close();
+            if (event.type == Event::KeyPressed && event.key.code == Keyboard::Escape) window.close();
+            
+            // Context-Sensitive Enter Key
+            if (event.type == Event::KeyPressed && event.key.code == Keyboard::Enter) {
+                
+                if (currentState == GameState::GameOver) {
+                    
+                    // Stop previous sounds and perform heavy music rewind here, while screen is static
+                    game_overSound.stop(); 
+                    crashSound.stop();
+                    bgMusic.stop();
 
-            if (event.type == sf::Event::KeyPressed) {
-                auto k = event.key.code;
+                    currentState = GameState::Playing;
+                    score = 0;
+                    globalSpeedMultiplier = 1.0f;
+                    spawnTimer = 0.0f;
+                    enemies.clear(); 
 
-                // ── Menu ──
-                if (state == GameState::MENU) {
-                    if (k == sf::Keyboard::Num1) difficulty = Difficulty::EASY;
-                    if (k == sf::Keyboard::Num2) difficulty = Difficulty::MEDIUM;
-                    if (k == sf::Keyboard::Num3) difficulty = Difficulty::HARD;
-                    if (k == sf::Keyboard::Enter) { resetGame(); state = GameState::PLAYING; }
-                }
-
-                // ── Pause ──
-                if (state == GameState::PLAYING  && k == sf::Keyboard::P) state = GameState::PAUSED;
-                if (state == GameState::PAUSED   && k == sf::Keyboard::P) state = GameState::PLAYING;
-
-                // ── Game Over ──
-                if (state == GameState::GAMEOVER) {
-                    if (k == sf::Keyboard::R) { resetGame(); state = GameState::PLAYING; }
-                    if (k == sf::Keyboard::M) state = GameState::MENU;
-                }
-
-                // ── Player movement ──
-                if (state == GameState::PLAYING && player) {
-                    if (k == sf::Keyboard::Left  || k == sf::Keyboard::A) player->moveLeft();
-                    if (k == sf::Keyboard::Right || k == sf::Keyboard::D) player->moveRight();
-                }
-
-                if (k == sf::Keyboard::Escape) window.close();
-            }
-        }
-
-        // ── Update ──
-        if (state == GameState::PLAYING) {
-            elapsed  += dt;
-            score     = (int)(elapsed * 10);
-            if (score > highScore) highScore = score;
-
-            // Speed scaling — every 10s increase level
-            speedLevel = 1 + (int)(elapsed / 10.f);
-            gameSpeed  = baseSpeed + (speedLevel - 1) * 25.f;
-
-            // Spawn interval shrinks over time (min 0.4s)
-            float spawnNow = std::max(0.4f, spawnInterval - elapsed * 0.008f);
-
-            // Animate lane marks
-            markOffset += gameSpeed * dt;
-            if (markOffset >= 60.f) markOffset -= 60.f;
-
-            // Spawn enemies
-            spawnTimer += dt;
-            if (spawnTimer >= spawnNow) {
-                spawnTimer = 0.f;
-                int lane = rand() % NUM_LANES;
-                sf::Texture* tex = enemyTextures[rand() % enemyTextures.size()];
-                float spd = gameSpeed + (float)(rand() % 60 - 20);
-                if (difficulty == Difficulty::HARD) spd += (float)(rand() % 80);
-                enemies.push_back(new EnemyCar(*tex, lane, spd));
-
-                // Hard: sometimes spawn in 2 lanes simultaneously
-                if (difficulty == Difficulty::HARD && rand() % 3 == 0) {
-                    int lane2 = (lane + 1 + rand() % 2) % NUM_LANES;
-                    sf::Texture* tex2 = enemyTextures[rand() % enemyTextures.size()];
-                    enemies.push_back(new EnemyCar(*tex2, lane2, spd + rand() % 50));
-                }
-                // Medium: occasionally 2 cars
-                if (difficulty == Difficulty::MEDIUM && rand() % 5 == 0) {
-                    int lane2 = (lane + 1 + rand() % 2) % NUM_LANES;
-                    sf::Texture* tex2 = enemyTextures[rand() % enemyTextures.size()];
-                    enemies.push_back(new EnemyCar(*tex2, lane2, spd));
-                }
-            }
-
-            // Update player
-            if (player) player->update(dt);
-
-            // Update enemies & remove off-screen
-            for (auto e : enemies) e->update(dt);
-            enemies.erase(
-                std::remove_if(enemies.begin(), enemies.end(),
-                    [](EnemyCar* e) {
-                        if (!e->active) { delete e; return true; }
-                        return false;
-                    }),
-                enemies.end()
-            );
-
-            // Collision Detection — tighter hitbox for fairness
-            if (player) {
-                sf::FloatRect pb = player->getBounds();
-                pb.left   += 8.f;  pb.width  -= 16.f;
-                pb.top    += 8.f;  pb.height -= 16.f;
-                for (auto e : enemies) {
-                    sf::FloatRect eb = e->getBounds();
-                    eb.left  += 6.f; eb.width  -= 12.f;
-                    eb.top   += 6.f; eb.height -= 12.f;
-                    if (pb.intersects(eb)) {
-                        state = GameState::GAMEOVER;
-                        break;
-                    }
+                    bgMusic.setVolume(50.f); 
+                    bgMusic.play();
+                } 
+                else if (currentState == GameState::Playing) {
+                    currentState = GameState::Paused;
+                    bgMusic.pause();
+                } 
+                else if (currentState == GameState::Paused) {
+                    currentState = GameState::Playing;
+                    bgMusic.play();
                 }
             }
         }
 
-        // ══════════════════════════════════════════════════════════════════
-        // Draw
-        // ══════════════════════════════════════════════════════════════════
-        window.clear(sf::Color(10, 10, 18));
+        // --- B. UPDATE PHASE ---
+        if (currentState == GameState::Playing) {
+            
+            globalSpeedMultiplier += deltaTime * 0.01f; 
+            if (globalSpeedMultiplier > 2.5f) globalSpeedMultiplier = 2.5f; // Cap difficulty
+            
+            float currentRoadSpeed = baseRoadSpeed * globalSpeedMultiplier;
 
-        // Background
-        window.draw(bgTop);
-        window.draw(bgBot);
+            // 1. Scroll Background
+            roadBackground1.move(0.f, currentRoadSpeed * deltaTime);
+            roadBackground2.move(0.f, currentRoadSpeed * deltaTime);
 
-        // Road
-        window.draw(road);
-        window.draw(edgeL);
-        window.draw(edgeR);
+            if (roadBackground1.getPosition().y >= 600.f) roadBackground1.setPosition(0.f, roadBackground2.getPosition().y - 600.f);
+            if (roadBackground2.getPosition().y >= 600.f) roadBackground2.setPosition(0.f, roadBackground1.getPosition().y - 600.f);
 
-        // Animated lane dashes
-        for (auto& d : dashes) {
-            float dy = d.baseY + markOffset;
-            // Wrap around
-            if (dy > WINDOW_H) dy -= (WINDOW_H + 60.f);
-            dashShape.setPosition(d.x, dy);
-            window.draw(dashShape);
-        }
+            // 2. Handle Player Input
+            if (Keyboard::isKeyPressed(Keyboard::Left) || Keyboard::isKeyPressed(Keyboard::A)) {
+                player.moveLeft();
+            }
+            else if (Keyboard::isKeyPressed(Keyboard::Right) || Keyboard::isKeyPressed(Keyboard::D)) {
+                player.moveRight();
+            }
+            
+            // 3. Apply Player Physics
+            player.update(deltaTime, currentRoadSpeed);
 
-        // ── MENU ──────────────────────────────────────────────────────────
-        if (state == GameState::MENU) {
-            // Title
-            auto title = makeText("CAR  DODGE", 50, sf::Color::Yellow);
-            title.setStyle(sf::Text::Bold);
-            title.setPosition(WINDOW_W / 2.f - title.getLocalBounds().width / 2.f, 130);
-            window.draw(title);
+            // 4. Enemy Spawning Logic
+            spawnTimer += deltaTime;
+            float currentSpawnInterval = baseSpawnInterval / globalSpeedMultiplier;
 
-            // Subtitle
-            auto sub = makeText("Survive the traffic!", 18, sf::Color(180,180,180));
-            sub.setPosition(WINDOW_W / 2.f - sub.getLocalBounds().width / 2.f, 195);
-            window.draw(sub);
+            if (spawnTimer >= currentSpawnInterval) {
+                float randomX = 150.f + static_cast<float>(std::rand()) / (static_cast<float>(RAND_MAX / (650.f - 150.f - 52.f))); 
+                const Texture* chosenTex = (std::rand() % 2 == 0) ? &redCarTex : &yellowCarTex;
 
-            // Difficulty
-            std::string dstr = "Difficulty: ";
-            sf::Color dcol;
-            if      (difficulty == Difficulty::EASY)   { dstr += "EASY";   dcol = sf::Color(80,220,80); }
-            else if (difficulty == Difficulty::MEDIUM)  { dstr += "MEDIUM"; dcol = sf::Color(240,180,0); }
-            else                                        { dstr += "HARD";   dcol = sf::Color(240,60,60); }
-            auto dt2 = makeText(dstr, 22, dcol);
-            dt2.setPosition(WINDOW_W / 2.f - dt2.getLocalBounds().width / 2.f, 260);
-            window.draw(dt2);
-
-            // Controls list
-            std::vector<std::pair<std::string, sf::Color>> lines = {
-                {"[1] Easy   [2] Medium   [3] Hard", sf::Color(160,160,160)},
-                {"",                                 sf::Color::White},
-                {"ENTER  :  Start",                  sf::Color::White},
-                {"A / D or Arrow Keys  :  Move",     sf::Color(200,200,200)},
-                {"P  :  Pause",                      sf::Color(200,200,200)},
-                {"ESC  :  Quit",                     sf::Color(200,200,200)},
-            };
-            float lineY = 315.f;
-            for (auto& [txt, col] : lines) {
-                auto t = makeText(txt, 18, col);
-                t.setPosition(WINDOW_W / 2.f - t.getLocalBounds().width / 2.f, lineY);
-                window.draw(t);
-                lineY += 32.f;
+                // Enemy's unique driving speed added to the road speed
+                float randomBonusSpeed = 20.f + static_cast<float>(std::rand() % 81); 
+                
+                enemies.push_back(std::make_unique<EnemyCar>(randomX, -150.f, randomBonusSpeed, *chosenTex));
+                spawnTimer = 0.0f; 
             }
 
-            // High score
-            if (highScore > 0) {
-                auto hs = makeText("Best: " + toStr(highScore), 20, sf::Color(255,215,0));
-                hs.setPosition(WINDOW_W / 2.f - hs.getLocalBounds().width / 2.f, lineY + 20);
-                window.draw(hs);
+            // 5. Update Enemies & Check Collisions
+            for (auto it = enemies.begin(); it != enemies.end(); ) {
+                EnemyCar* enemy = it->get(); 
+                enemy->update(deltaTime, currentRoadSpeed); 
+
+                FloatRect playerBounds = player.getBounds();
+                FloatRect enemyBounds = enemy->getBounds();
+                
+                // Forgiving Hitboxes
+                playerBounds.left += 10.f; playerBounds.width -= 20.f;
+                playerBounds.top += 5.f; playerBounds.height -= 10.f;
+                
+                enemyBounds.left += 5.f; enemyBounds.width -= 10.f;
+                enemyBounds.top += 5.f; enemyBounds.height -= 10.f;
+
+                if (playerBounds.intersects(enemyBounds)) {
+                    // Play sound effects FIRST so there is no delay
+                    crashSound.play();
+                    game_overSound.play();
+
+                    // Lightweight pause so the thread doesn't block
+                    bgMusic.pause(); 
+                    
+                    currentState = GameState::GameOver;
+                    break;
+                }
+
+                // Memory Cleanup & Scoring
+                float enemyY = enemy->getPosition().y;
+                if (enemyY > 650.f) { 
+                    score += 10;            
+                    it = enemies.erase(it); 
+                } else {
+                    ++it; 
+                }
             }
+
+            /// 6. Update HUD Strings using stringstream
+            
+            // Score String
+            std::stringstream scoreStream;
+            scoreStream << "SCORE:" << score;
+            scoreText.setString(scoreStream.str());
+
+            // Speed String (formatted to 1 decimal place)
+            std::stringstream speedStream;
+            speedStream << "SPEED:" << std::fixed << std::setprecision(1) << globalSpeedMultiplier << "X";
+            speedText.setString(speedStream.str());
         }
 
-        // ── PLAYING / PAUSED ──────────────────────────────────────────────
-        if (state == GameState::PLAYING || state == GameState::PAUSED) {
-            // Draw enemies then player (player on top)
-            for (auto e : enemies) e->draw(window);
-            if (player) player->draw(window);
+        // --- C. RENDER PHASE ---
+        window.clear(); 
 
-            // Score bar background
-            sf::RectangleShape hbar({(float)WINDOW_W, 40.f});
-            hbar.setFillColor(sf::Color(0, 0, 0, 160));
-            window.draw(hbar);
+        window.draw(roadBackground1);
+        window.draw(roadBackground2);
 
-            auto sc = makeText("SCORE: " + toStr(score), 20, sf::Color::White);
-            sc.setStyle(sf::Text::Bold);
-            sc.setPosition(8, 8);
-            window.draw(sc);
-
-            auto sp = makeText("SPEED: " + toStr(speedLevel), 20, sf::Color(100, 220, 255));
-            sp.setStyle(sf::Text::Bold);
-            sp.setPosition(WINDOW_W - sp.getLocalBounds().width - 10, 8);
-            window.draw(sp);
-
-            std::string dLabel;
-            sf::Color dCol;
-            if      (difficulty == Difficulty::EASY)   { dLabel = "EASY";   dCol = sf::Color(80,220,80); }
-            else if (difficulty == Difficulty::MEDIUM)  { dLabel = "MEDIUM"; dCol = sf::Color(240,180,0); }
-            else                                        { dLabel = "HARD";   dCol = sf::Color(240,60,60); }
-            auto dl = makeText(dLabel, 16, dCol);
-            dl.setPosition(WINDOW_W / 2.f - dl.getLocalBounds().width / 2.f, 10);
-            window.draw(dl);
+        player.draw(window);
+        for (const auto& enemy : enemies) {
+            enemy->draw(window);
         }
 
-        // ── PAUSED overlay ────────────────────────────────────────────────
-        if (state == GameState::PAUSED) {
-            sf::RectangleShape ov({(float)WINDOW_W, (float)WINDOW_H});
-            ov.setFillColor(sf::Color(0, 0, 0, 150));
-            window.draw(ov);
+        window.draw(scoreText);
+        window.draw(speedText);
 
-            auto pm = makeText("PAUSED", 48, sf::Color::Cyan);
-            pm.setStyle(sf::Text::Bold);
-            pm.setPosition(WINDOW_W / 2.f - pm.getLocalBounds().width / 2.f, WINDOW_H / 2.f - 60);
-            window.draw(pm);
-
-            auto ps = makeText("Press P to Resume", 20, sf::Color(180,180,180));
-            ps.setPosition(WINDOW_W / 2.f - ps.getLocalBounds().width / 2.f, WINDOW_H / 2.f + 10);
-            window.draw(ps);
-        }
-
-        // ── GAME OVER ─────────────────────────────────────────────────────
-        if (state == GameState::GAMEOVER) {
-            // Still render the scene underneath
-            for (auto e : enemies) e->draw(window);
-            if (player) player->draw(window);
-
-            // Dark overlay
-            sf::RectangleShape ov({(float)WINDOW_W, (float)WINDOW_H});
-            ov.setFillColor(sf::Color(0, 0, 0, 185));
-            window.draw(ov);
-
-            // Red flash border
-            sf::RectangleShape border({(float)WINDOW_W - 8, (float)WINDOW_H - 8});
-            border.setFillColor(sf::Color::Transparent);
-            border.setOutlineColor(sf::Color(220, 40, 40, 200));
-            border.setOutlineThickness(4);
-            border.setPosition(4, 4);
-            window.draw(border);
-
-            auto go = makeText("GAME OVER", 46, sf::Color(220, 40, 40));
-            go.setStyle(sf::Text::Bold);
-            go.setPosition(WINDOW_W / 2.f - go.getLocalBounds().width / 2.f, WINDOW_H / 2.f - 110);
-            window.draw(go);
-
-            auto sc = makeText("Score: " + toStr(score), 30, sf::Color::White);
-            sc.setPosition(WINDOW_W / 2.f - sc.getLocalBounds().width / 2.f, WINDOW_H / 2.f - 40);
-            window.draw(sc);
-
-            auto hs = makeText("Best:  " + toStr(highScore), 22, sf::Color(255, 215, 0));
-            hs.setPosition(WINDOW_W / 2.f - hs.getLocalBounds().width / 2.f, WINDOW_H / 2.f + 5);
-            window.draw(hs);
-
-            auto r1 = makeText("[R]  Restart", 20, sf::Color(100, 255, 100));
-            r1.setPosition(WINDOW_W / 2.f - r1.getLocalBounds().width / 2.f, WINDOW_H / 2.f + 60);
-            window.draw(r1);
-
-            auto r2 = makeText("[M]  Main Menu", 20, sf::Color(180, 180, 255));
-            r2.setPosition(WINDOW_W / 2.f - r2.getLocalBounds().width / 2.f, WINDOW_H / 2.f + 95);
-            window.draw(r2);
+        if (currentState == GameState::GameOver) {
+            window.draw(gameOverText);
+        } else if (currentState == GameState::Paused) {
+            window.draw(pausedText); 
         }
 
         window.display();
     }
 
-    // Cleanup
-    delete player;
-    for (auto e : enemies) delete e;
     return 0;
 }
